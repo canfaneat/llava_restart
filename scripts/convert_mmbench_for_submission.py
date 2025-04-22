@@ -15,6 +15,8 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
 
+    # df = pd.read_table(args.annotation_file)第一次运行时，注释掉
+    args.annotation_file = "/kaggle/working/mmbench_data/mmbench_dev_20230712.tsv"  # 直接指定绝对路径
     df = pd.read_table(args.annotation_file)
 
     cur_df = df.copy()
