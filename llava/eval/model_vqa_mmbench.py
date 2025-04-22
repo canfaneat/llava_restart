@@ -59,7 +59,7 @@ def eval_model(args):
     tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
 
     # 原代码（第61行，路径错误）第一次运行时，注释掉
-    #questions = pd.read_table(os.path.expanduser(args.question_file))  # 默认为'./playground/data/eval/mmbench/mmbench_dev_20230712.tsv'
+    # questions = pd.read_table(os.path.expanduser(args.question_file))  # 默认为'./playground/data/eval/mmbench/mmbench_dev_20230712.tsv'
     # 修正后（指向实际数据路径）
     args.question_file = "/kaggle/input/mmbench/mmbench_dev_20230712.tsv"  # 直接指定绝对路径
     questions = pd.read_table(args.question_file)
