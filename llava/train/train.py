@@ -956,6 +956,39 @@ def train(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
+    # -------- 新增：冻结参数 For Baseline Training --------
+    print("--- Starting Baseline Parameter Freezing ---")
+    # 冻结所有参数 first
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+        # print(f"Froze: {name}") # Uncomment for detailed verification
+
+    # 解冻 mm_projector 的参数 - 通过 model.get_model() 访问
+    unfrozen_projector = False
+    core_model = model.get_model()
+    if hasattr(core_model, 'mm_projector') and core_model.mm_projector is not None:
+        print("Attempting to unfreeze parameters in model.get_model().mm_projector...")
+        for name, param in core_model.mm_projector.named_parameters():
+            param.requires_grad = True
+            unfrozen_projector = True
+            # print(f"Unfroze: get_model().mm_projector.{name}") # Uncomment for detailed verification
+        if unfrozen_projector:
+            print("Successfully unfroze parameters in model.get_model().mm_projector.")
+    else:
+         print("[Warning] Could not find 'mm_projector' within model.get_model(). Double-check model architecture.")
+
+    if not unfrozen_projector:
+        print("[Error] Failed to unfreeze any projector parameters. Training might not work as expected.")
+
+    # (可选) 打印可训练参数数量确认
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params}")
+    print(f"Trainable parameters: {trainable_params} ({trainable_params/total_params*100:.4f}%)")
+    print(f"Expected trainable params for LLaVA v1.5 MLP projector: ~5M (check if actual number is close)")
+    print("--- Finished Baseline Parameter Freezing ---")
+    # -------- 冻结参数结束 --------
+
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
     trainer = LLaVATrainer(model=model,
