@@ -824,13 +824,18 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         else:
+            print(f"Explicitly loading {model_args.model_name_or_path} with low_cpu_mem_usage=True, device_map='auto'")
+            compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
             model = LlavaLlamaForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,
-                torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                torch_dtype=compute_dtype,
+                low_cpu_mem_usage=True,
+                device_map="auto",
                 **bnb_model_from_pretrained_args
             )
+            print("Model loading initiated with optimization flags.")
     else:
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
