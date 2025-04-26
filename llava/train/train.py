@@ -694,46 +694,79 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        
+        image_data = None # Initialize image data
+        image_file_relative = None # Initialize
+        
         if 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
+            image_file_relative = self.list_data_dict[i]['image'] # Get the path from JSON, e.g., "coco/train2017/xxxxx.jpg"
+            image_folder_base = self.data_args.image_folder # e.g., "/kaggle/input/coco-2017-dataset"
+            
+            # --- Corrected Path Construction Logic ---
+            actual_image_path = ""
+            try:
+                if image_file_relative.startswith('coco/'):
+                    # Replace 'coco/' with 'coco2017/' before joining
+                    corrected_relative_path = image_file_relative.replace('coco/', 'coco2017/', 1) # Replace only the first occurrence
+                    actual_image_path = os.path.join(image_folder_base, corrected_relative_path)
+                else:
+                    # Handle other potential dataset paths or raise error if unexpected in coco-only mode
+                    # For now, assume only coco paths exist due to filtering
+                    print(f"[Warning] Encountered non-COCO path prefix in coco-only mode: {image_file_relative}. Trying direct join.")
+                    actual_image_path = os.path.join(image_folder_base, image_file_relative) # Fallback for unexpected cases
+
+                if actual_image_path: # Ensure path was constructed
+                    processor = self.data_args.image_processor
+                    image = Image.open(actual_image_path).convert('RGB')
+                    
+                    # Image processing logic (same as before)
+                    if self.data_args.image_aspect_ratio == 'pad':
+                        def expand2square(pil_img, background_color):
+                            width, height = pil_img.size
+                            if width == height:
+                                return pil_img
+                            elif width > height:
+                                result = Image.new(pil_img.mode, (width, width), background_color)
+                                result.paste(pil_img, (0, (width - height) // 2))
+                                return result
+                            else:
+                                result = Image.new(pil_img.mode, (height, height), background_color)
+                                result.paste(pil_img, ((height - width) // 2, 0))
+                                return result
+                        image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+                        image_data = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
                     else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+                        image_data = processor.preprocess(image, return_tensors='pt')['pixel_values'][0] # Store processed image
+
+            except FileNotFoundError:
+                print(f"[Error] Image not found at constructed path: {actual_image_path}. Original JSON path: {image_file_relative}")
+                crop_size = self.data_args.image_processor.crop_size
+                image_data = torch.zeros(3, crop_size['height'], crop_size['width']) # Return dummy tensor
+            except Exception as e:
+                print(f"[Error] Error processing image {image_file_relative}: {e}")
+                crop_size = self.data_args.image_processor.crop_size
+                image_data = torch.zeros(3, crop_size['height'], crop_size['width']) # Return dummy tensor
+            # --- End Path Construction Logic ---
+
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
-        else:
+        else: 
             sources = copy.deepcopy([e["conversations"] for e in sources])
+        
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
+            has_image = (image_data is not None)
+        )
+        
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
 
-        # image exist in the data
-        if 'image' in self.list_data_dict[i]:
-            data_dict['image'] = image
+        if image_data is not None: 
+            data_dict['image'] = image_data
         elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
