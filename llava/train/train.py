@@ -862,7 +862,7 @@ def train(attn_implementation=None):
             model = LlavaLlamaForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
-                attn_implementation=attn_implementation,
+                attn_implementation="eager",
                 torch_dtype=compute_dtype,
                 low_cpu_mem_usage=True,
                 device_map=None,
@@ -872,7 +872,7 @@ def train(attn_implementation=None):
         model = transformers.LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
+            attn_implementation="eager",
             torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
             device_map=None,
         )
