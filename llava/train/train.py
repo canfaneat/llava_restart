@@ -1009,7 +1009,7 @@ def train(attn_implementation=None):
                         module = module.to(torch.bfloat16)
 
     # -------- Corrected: 冻结参数 For Baseline Training --------
-    print("--- Starting Baseline Parameter Freezing (Corrected) ---")
+    print("--- Starting Parameter Freezing (Projector Only Tuning) ---")
     # 冻结所有参数 first
     for name, param in model.named_parameters():
         param.requires_grad = False
@@ -1017,93 +1017,49 @@ def train(attn_implementation=None):
 
     # 需要解冻的模块列表
     modules_to_unfreeze = []
+    unfrozen_something = False # Track if we actually unfroze anything
 
     # 1. 解冻 mm_projector
-    unfrozen_projector = False
     core_model = model.get_model() # 获取基础模型 (LlavaLlamaModel)
     if hasattr(core_model, 'mm_projector') and core_model.mm_projector is not None:
         print("Attempting to unfreeze parameters in model.get_model().mm_projector...")
+        projector_unfrozen_count = 0
         for name, param in core_model.mm_projector.named_parameters():
             param.requires_grad = True
-            unfrozen_projector = True
+            projector_unfrozen_count += 1
             # print(f"Unfroze Projector: {name}")
-        if unfrozen_projector:
-            print("Successfully unfroze parameters in model.get_model().mm_projector.")
+        if projector_unfrozen_count > 0:
+            print(f"Successfully unfroze {projector_unfrozen_count} parameters in model.get_model().mm_projector.")
             modules_to_unfreeze.append("mm_projector")
-    else:
-         print("[Warning] Could not find 'mm_projector' within model.get_model().")
+            unfrozen_something = True
+        else:
+            print("[Warning] Found mm_projector, but no parameters were unfrozen within it.")
 
-    # 2. 解冻 Input Embeddings (处理新添加的 image tokens)
-    # 注意：LlavaLlamaForCausalLM 的 get_input_embeddings() 返回的是 LlamaModel 的 embed_tokens
-    print("Attempting to unfreeze parameters in model.get_input_embeddings()...")
-    input_embeddings_unfrozen = False
-    if hasattr(model, 'get_input_embeddings'):
-        for name, param in model.get_input_embeddings().named_parameters():
-             param.requires_grad = True
-             input_embeddings_unfrozen = True
-             # print(f"Unfroze Input Embed: {name}")
-        if input_embeddings_unfrozen:
-             print("Successfully unfroze parameters in model.get_input_embeddings().")
-             modules_to_unfreeze.append("input_embeddings")
     else:
-        print("[Warning] Could not find 'get_input_embeddings' method.")
+         print("[Warning] Could not find 'mm_projector' within model.get_model(). Training projector only might fail.")
 
-    # 3. 解冻 LM Head (因为 vocab size 可能因新 token 改变)
-    # 注意: LlavaLlamaForCausalLM 的 get_output_embeddings() 直接引用 lm_head
-    print("Attempting to unfreeze parameters in model.get_output_embeddings()...")
-    output_embeddings_unfrozen = False
-    if hasattr(model, 'get_output_embeddings'):
-         # lm_head 可能没有 'named_parameters' 如果它只是一个简单的线性层且未被包装
-         # 直接设置 lm_head 的 requires_grad
-        if hasattr(model.get_output_embeddings(), 'weight'):
-            model.get_output_embeddings().weight.requires_grad = True
-            output_embeddings_unfrozen = True
-            # print(f"Unfroze Output Embed/LM Head: weight")
-        # 检查是否有 bias
-        if hasattr(model.get_output_embeddings(), 'bias') and model.get_output_embeddings().bias is not None:
-             model.get_output_embeddings().bias.requires_grad = True
-             output_embeddings_unfrozen = True
-             # print(f"Unfroze Output Embed/LM Head: bias")
 
-        if output_embeddings_unfrozen:
-             print("Successfully unfroze parameters in model.get_output_embeddings().")
-             modules_to_unfreeze.append("output_embeddings/lm_head")
-    else:
-         # 备用方案：尝试直接访问 lm_head
-         if hasattr(model, 'lm_head'):
-             print("Attempting to unfreeze parameters in model.lm_head...")
-             if hasattr(model.lm_head, 'weight'):
-                 model.lm_head.weight.requires_grad = True
-                 output_embeddings_unfrozen = True
-                 # print(f"Unfroze LM Head: weight")
-             if hasattr(model.lm_head, 'bias') and model.lm_head.bias is not None:
-                 model.lm_head.bias.requires_grad = True
-                 output_embeddings_unfrozen = True
-                 # print(f"Unfroze LM Head: bias")
-             if output_embeddings_unfrozen:
-                print("Successfully unfroze parameters in model.lm_head.")
-                modules_to_unfreeze.append("lm_head")
-             else:
-                 print("[Warning] Could not find 'weight' or 'bias' in model.lm_head.")
-         else:
-            print("[Warning] Could not find 'get_output_embeddings' method or 'lm_head' attribute.")
+    # --- Keep Input Embeddings Frozen ---
+    print("Keeping Input Embeddings frozen.")
+    # --- Keep LM Head Frozen ---
+    print("Keeping Output Embeddings / LM Head frozen.")
 
 
     # 验证哪些模块被解冻了
     print(f"Modules intended for unfreezing: {modules_to_unfreeze}")
-    if "mm_projector" not in modules_to_unfreeze or ("input_embeddings" not in modules_to_unfreeze and "output_embeddings/lm_head" not in modules_to_unfreeze):
-         print("[ERROR] Critical modules (projector, embeddings/lm_head) might not have been unfrozen correctly!")
+    if not unfrozen_something:
+         print("[ERROR] No parameters were unfrozen! Check model structure and freezing logic.")
+    elif "mm_projector" not in modules_to_unfreeze:
+        print("[Warning] mm_projector was not explicitly marked for unfreezing, although some parameters might be trainable if found elsewhere.")
+
 
     # 打印最终的可训练参数数量确认
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params}")
-    print(f"Trainable parameters (Post freezing): {trainable_params} ({trainable_params/total_params*100:.4f}%)")
-    # 这里的预期值需要重新计算，包含 projector (~5M) + input embeds (?) + lm head (?)
-    # Vicuna 7B vocab size 约 32000，hidden size 4096. Embeds/LM head 大约是 2 * 32000 * 4096 ≈ 268M ?
-    # 不对，LLaVA resize 了 vocab size, 且只训练部分 embedding? 需要更精确计算或根据运行结果判断
-    print(f"Expected trainable params for LLaVA v1.5 MLP projector + Embeds + LM Head: ??? (Check if actual number is reasonable)")
-    print("--- Finished Baseline Parameter Freezing (Corrected) ---")
+    print(f"Trainable parameters (Post freezing - Projector Only): {trainable_params} ({trainable_params/total_params*100:.4f}%)")
+    print(f"Expected trainable params should match the size of the mm_projector (e.g., ~5M for mlp2x_gelu).")
+    print("--- Finished Parameter Freezing (Projector Only Tuning) ---")
     # -------- 冻结参数结束 --------
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
