@@ -694,31 +694,27 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
-        
+
         image_data = None # Initialize image data
         image_file_relative = None # Initialize
-        
+
         if 'image' in sources[0]:
             image_file_relative = self.list_data_dict[i]['image'] # Get the path from JSON, e.g., "coco/train2017/xxxxx.jpg"
-            image_folder_base = self.data_args.image_folder # e.g., "/kaggle/input/coco-2017-dataset"
-            
+            image_folder_base = self.data_args.image_folder # e.g., "/kaggle/input/coco-2017-dataset/coco2017/train2017"
+
             # --- Corrected Path Construction Logic ---
             actual_image_path = ""
             try:
-                if image_file_relative.startswith('coco/'):
-                    # Replace 'coco/' with 'coco2017/' before joining
-                    corrected_relative_path = image_file_relative.replace('coco/', 'coco2017/', 1) # Replace only the first occurrence
-                    actual_image_path = os.path.join(image_folder_base, corrected_relative_path)
-                else:
-                    # Handle other potential dataset paths or raise error if unexpected in coco-only mode
-                    # For now, assume only coco paths exist due to filtering
-                    print(f"[Warning] Encountered non-COCO path prefix in coco-only mode: {image_file_relative}. Trying direct join.")
-                    actual_image_path = os.path.join(image_folder_base, image_file_relative) # Fallback for unexpected cases
+                # Extract the filename from the relative path in JSON
+                image_filename = os.path.basename(image_file_relative)
+                # Construct the full path by joining the base folder and the filename
+                actual_image_path = os.path.join(image_folder_base, image_filename)
 
+                # --- The rest of the image loading and processing logic remains the same ---
                 if actual_image_path: # Ensure path was constructed
                     processor = self.data_args.image_processor
                     image = Image.open(actual_image_path).convert('RGB')
-                    
+
                     # Image processing logic (same as before)
                     if self.data_args.image_aspect_ratio == 'pad':
                         def expand2square(pil_img, background_color):
@@ -739,7 +735,7 @@ class LazySupervisedDataset(Dataset):
                         image_data = processor.preprocess(image, return_tensors='pt')['pixel_values'][0] # Store processed image
 
             except FileNotFoundError:
-                print(f"[Error] Image not found at constructed path: {actual_image_path}. Original JSON path: {image_file_relative}")
+                print(f"[Error] Image not found at constructed path: {actual_image_path}. Original JSON path: {image_file_relative}. Base folder: {image_folder_base}") # Added base folder for clarity
                 crop_size = self.data_args.image_processor.crop_size
                 image_data = torch.zeros(3, crop_size['height'], crop_size['width']) # Return dummy tensor
             except Exception as e:
@@ -751,20 +747,20 @@ class LazySupervisedDataset(Dataset):
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
-        else: 
+        else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
-        
+
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image = (image_data is not None)
+            has_image=(image_data is not None)
         )
-        
+
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
 
-        if image_data is not None: 
+        if image_data is not None:
             data_dict['image'] = image_data
         elif self.data_args.is_multimodal:
             crop_size = self.data_args.image_processor.crop_size
@@ -826,6 +822,27 @@ def train(attn_implementation=None):
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+
+    # <<< Start of modification: Load deepspeed config from file >>>
+    # Check if the deepspeed argument is still a path (it shouldn't be if we removed it from CLI)
+    # If it is, or if we explicitly want to load from file here:
+    deepspeed_config_path = "./ds_config_zero2_optim_offload.json" # Hardcode the path here
+    if os.path.exists(deepspeed_config_path):
+        print(f"Rank {local_rank}: Loading DeepSpeed config from {deepspeed_config_path}")
+        with open(deepspeed_config_path, "r") as f:
+            ds_config = json.load(f)
+        # Explicitly assign the loaded dictionary to training_args.deepspeed
+        # This overrides any value potentially passed via CLI or default
+        training_args.deepspeed = ds_config
+        print(f"Rank {local_rank}: Successfully loaded and assigned DeepSpeed config dict.")
+    else:
+        # Handle case where file doesn't exist, maybe raise error or warning
+        # If deepspeed is expected, this should likely be an error.
+        if training_args.deepspeed is not None:
+             print(f"[Warning] Rank {local_rank}: DeepSpeed config file {deepspeed_config_path} not found, but deepspeed argument was present. Proceeding without loading from file.")
+        # If training_args.deepspeed was already a dict (e.g., from future accelerate integration), it might be fine.
+        # Or if deepspeed wasn't intended, training_args.deepspeed would be None.
+    # <<< End of modification >>>
 
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4, 8]:
@@ -991,37 +1008,102 @@ def train(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    # -------- 新增：冻结参数 For Baseline Training --------
-    print("--- Starting Baseline Parameter Freezing ---")
+    # -------- Corrected: 冻结参数 For Baseline Training --------
+    print("--- Starting Baseline Parameter Freezing (Corrected) ---")
     # 冻结所有参数 first
     for name, param in model.named_parameters():
         param.requires_grad = False
-        # print(f"Froze: {name}") # Uncomment for detailed verification
+        # print(f"Froze: {name}")
 
-    # 解冻 mm_projector 的参数 - 通过 model.get_model() 访问
+    # 需要解冻的模块列表
+    modules_to_unfreeze = []
+
+    # 1. 解冻 mm_projector
     unfrozen_projector = False
-    core_model = model.get_model()
+    core_model = model.get_model() # 获取基础模型 (LlavaLlamaModel)
     if hasattr(core_model, 'mm_projector') and core_model.mm_projector is not None:
         print("Attempting to unfreeze parameters in model.get_model().mm_projector...")
         for name, param in core_model.mm_projector.named_parameters():
             param.requires_grad = True
             unfrozen_projector = True
-            # print(f"Unfroze: get_model().mm_projector.{name}") # Uncomment for detailed verification
+            # print(f"Unfroze Projector: {name}")
         if unfrozen_projector:
             print("Successfully unfroze parameters in model.get_model().mm_projector.")
+            modules_to_unfreeze.append("mm_projector")
     else:
-         print("[Warning] Could not find 'mm_projector' within model.get_model(). Double-check model architecture.")
+         print("[Warning] Could not find 'mm_projector' within model.get_model().")
 
-    if not unfrozen_projector:
-        print("[Error] Failed to unfreeze any projector parameters. Training might not work as expected.")
+    # 2. 解冻 Input Embeddings (处理新添加的 image tokens)
+    # 注意：LlavaLlamaForCausalLM 的 get_input_embeddings() 返回的是 LlamaModel 的 embed_tokens
+    print("Attempting to unfreeze parameters in model.get_input_embeddings()...")
+    input_embeddings_unfrozen = False
+    if hasattr(model, 'get_input_embeddings'):
+        for name, param in model.get_input_embeddings().named_parameters():
+             param.requires_grad = True
+             input_embeddings_unfrozen = True
+             # print(f"Unfroze Input Embed: {name}")
+        if input_embeddings_unfrozen:
+             print("Successfully unfroze parameters in model.get_input_embeddings().")
+             modules_to_unfreeze.append("input_embeddings")
+    else:
+        print("[Warning] Could not find 'get_input_embeddings' method.")
 
-    # (可选) 打印可训练参数数量确认
+    # 3. 解冻 LM Head (因为 vocab size 可能因新 token 改变)
+    # 注意: LlavaLlamaForCausalLM 的 get_output_embeddings() 直接引用 lm_head
+    print("Attempting to unfreeze parameters in model.get_output_embeddings()...")
+    output_embeddings_unfrozen = False
+    if hasattr(model, 'get_output_embeddings'):
+         # lm_head 可能没有 'named_parameters' 如果它只是一个简单的线性层且未被包装
+         # 直接设置 lm_head 的 requires_grad
+        if hasattr(model.get_output_embeddings(), 'weight'):
+            model.get_output_embeddings().weight.requires_grad = True
+            output_embeddings_unfrozen = True
+            # print(f"Unfroze Output Embed/LM Head: weight")
+        # 检查是否有 bias
+        if hasattr(model.get_output_embeddings(), 'bias') and model.get_output_embeddings().bias is not None:
+             model.get_output_embeddings().bias.requires_grad = True
+             output_embeddings_unfrozen = True
+             # print(f"Unfroze Output Embed/LM Head: bias")
+
+        if output_embeddings_unfrozen:
+             print("Successfully unfroze parameters in model.get_output_embeddings().")
+             modules_to_unfreeze.append("output_embeddings/lm_head")
+    else:
+         # 备用方案：尝试直接访问 lm_head
+         if hasattr(model, 'lm_head'):
+             print("Attempting to unfreeze parameters in model.lm_head...")
+             if hasattr(model.lm_head, 'weight'):
+                 model.lm_head.weight.requires_grad = True
+                 output_embeddings_unfrozen = True
+                 # print(f"Unfroze LM Head: weight")
+             if hasattr(model.lm_head, 'bias') and model.lm_head.bias is not None:
+                 model.lm_head.bias.requires_grad = True
+                 output_embeddings_unfrozen = True
+                 # print(f"Unfroze LM Head: bias")
+             if output_embeddings_unfrozen:
+                print("Successfully unfroze parameters in model.lm_head.")
+                modules_to_unfreeze.append("lm_head")
+             else:
+                 print("[Warning] Could not find 'weight' or 'bias' in model.lm_head.")
+         else:
+            print("[Warning] Could not find 'get_output_embeddings' method or 'lm_head' attribute.")
+
+
+    # 验证哪些模块被解冻了
+    print(f"Modules intended for unfreezing: {modules_to_unfreeze}")
+    if "mm_projector" not in modules_to_unfreeze or ("input_embeddings" not in modules_to_unfreeze and "output_embeddings/lm_head" not in modules_to_unfreeze):
+         print("[ERROR] Critical modules (projector, embeddings/lm_head) might not have been unfrozen correctly!")
+
+    # 打印最终的可训练参数数量确认
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params}")
-    print(f"Trainable parameters: {trainable_params} ({trainable_params/total_params*100:.4f}%)")
-    print(f"Expected trainable params for LLaVA v1.5 MLP projector: ~5M (check if actual number is close)")
-    print("--- Finished Baseline Parameter Freezing ---")
+    print(f"Trainable parameters (Post freezing): {trainable_params} ({trainable_params/total_params*100:.4f}%)")
+    # 这里的预期值需要重新计算，包含 projector (~5M) + input embeds (?) + lm head (?)
+    # Vicuna 7B vocab size 约 32000，hidden size 4096. Embeds/LM head 大约是 2 * 32000 * 4096 ≈ 268M ?
+    # 不对，LLaVA resize 了 vocab size, 且只训练部分 embedding? 需要更精确计算或根据运行结果判断
+    print(f"Expected trainable params for LLaVA v1.5 MLP projector + Embeds + LM Head: ??? (Check if actual number is reasonable)")
+    print("--- Finished Baseline Parameter Freezing (Corrected) ---")
     # -------- 冻结参数结束 --------
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
