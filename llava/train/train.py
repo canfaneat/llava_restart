@@ -865,7 +865,6 @@ def train(attn_implementation=None):
                 attn_implementation="eager",
                 torch_dtype=compute_dtype,
                 low_cpu_mem_usage=True,
-                device_map=None,
             )
             print("Model loading initiated.")
     else:
@@ -874,7 +873,6 @@ def train(attn_implementation=None):
             cache_dir=training_args.cache_dir,
             attn_implementation="eager",
             torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
-            device_map=None,
         )
     model.config.use_cache = False
 
