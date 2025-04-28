@@ -1041,6 +1041,13 @@ def train(attn_implementation=None):
     print("--- Finished Parameter Freezing (Projector Only Tuning) ---")
     # -------- 冻结参数结束 --------
 
+    # --- Add parameter count logging here ---
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n>>> Final Check: Total parameters: {total_params}")
+    print(f">>> Final Check: Trainable parameters: {trainable_params} ({trainable_params/total_params*100:.4f}%)\n")
+    # --- End parameter count logging ---
+
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
     trainer = LLaVATrainer(model=model,
