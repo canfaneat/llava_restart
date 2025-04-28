@@ -823,27 +823,6 @@ def train(attn_implementation=None):
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
-    # <<< Start of modification: Load deepspeed config from file >>>
-    # Check if the deepspeed argument is still a path (it shouldn't be if we removed it from CLI)
-    # If it is, or if we explicitly want to load from file here:
-    deepspeed_config_path = "./ds_config_zero2_optim_offload.json" # Hardcode the path here
-    if os.path.exists(deepspeed_config_path):
-        print(f"Rank {local_rank}: Loading DeepSpeed config from {deepspeed_config_path}")
-        with open(deepspeed_config_path, "r") as f:
-            ds_config = json.load(f)
-        # Explicitly assign the loaded dictionary to training_args.deepspeed
-        # This overrides any value potentially passed via CLI or default
-        training_args.deepspeed = ds_config
-        print(f"Rank {local_rank}: Successfully loaded and assigned DeepSpeed config dict.")
-    else:
-        # Handle case where file doesn't exist, maybe raise error or warning
-        # If deepspeed is expected, this should likely be an error.
-        if training_args.deepspeed is not None:
-             print(f"[Warning] Rank {local_rank}: DeepSpeed config file {deepspeed_config_path} not found, but deepspeed argument was present. Proceeding without loading from file.")
-        # If training_args.deepspeed was already a dict (e.g., from future accelerate integration), it might be fine.
-        # Or if deepspeed wasn't intended, training_args.deepspeed would be None.
-    # <<< End of modification >>>
-
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4, 8]:
         from transformers import BitsAndBytesConfig
