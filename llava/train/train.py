@@ -959,10 +959,13 @@ def train(attn_implementation=None):
             print("\n--- Applying --tune_mm_mlp_adapter freezing logic ---") # 添加日志
             model.requires_grad_(False)
             projector_params_unfrozen = 0
-            for p in model.get_model().mm_projector.parameters():
+            print("--- Parameters being unfrozen in mm_projector: ---") # New log start
+            for name, p in model.get_model().mm_projector.named_parameters(): # Use named_parameters
                 p.requires_grad = True
-                projector_params_unfrozen += p.numel()
-            print(f"--- Unfroze {projector_params_unfrozen} parameters in mm_projector ---") # 添加日志
+                numel = p.numel()
+                print(f"  - Unfreezing: {name} | Shape: {p.shape} | Numel: {numel}") # Detailed log
+                projector_params_unfrozen += numel
+            print(f"--- Total unfrozen in loop: {projector_params_unfrozen} parameters ---") # Adjusted log
 
             # --- Log parameters IMMEDIATELY after freezing logic ---
             trainable_params_after_freeze = sum(p.numel() for p in model.parameters() if p.requires_grad)
