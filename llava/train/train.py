@@ -956,9 +956,20 @@ def train(attn_implementation=None):
 
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
         if model_args.tune_mm_mlp_adapter:
+            print("\n--- Applying --tune_mm_mlp_adapter freezing logic ---") # 添加日志
             model.requires_grad_(False)
+            projector_params_unfrozen = 0
             for p in model.get_model().mm_projector.parameters():
                 p.requires_grad = True
+                projector_params_unfrozen += p.numel()
+            print(f"--- Unfroze {projector_params_unfrozen} parameters in mm_projector ---") # 添加日志
+
+            # --- Log parameters IMMEDIATELY after freezing logic ---
+            trainable_params_after_freeze = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params_after_freeze = sum(p.numel() for p in model.parameters())
+            print(f">>> IMMEDIATE Check: Total parameters: {total_params_after_freeze}")
+            print(f">>> IMMEDIATE Check: Trainable parameters: {trainable_params_after_freeze} ({trainable_params_after_freeze/total_params_after_freeze*100:.4f}%)")
+            # --- End IMMEDIATE logging ---
 
         model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
         if training_args.freeze_mm_mlp_adapter:
@@ -987,65 +998,14 @@ def train(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    # -------- Corrected: 冻结参数 For Baseline Training --------
-    print("--- Starting Parameter Freezing (Projector Only Tuning) ---")
-    # 冻结所有参数 first
-    for name, param in model.named_parameters():
-        param.requires_grad = False
-        # print(f"Froze: {name}")
-
-    # 需要解冻的模块列表
-    modules_to_unfreeze = []
-    unfrozen_something = False # Track if we actually unfroze anything
-
-    # 1. 解冻 mm_projector
-    core_model = model.get_model() # 获取基础模型 (LlavaLlamaModel)
-    if hasattr(core_model, 'mm_projector') and core_model.mm_projector is not None:
-        print("Attempting to unfreeze parameters in model.get_model().mm_projector...")
-        projector_unfrozen_count = 0
-        for name, param in core_model.mm_projector.named_parameters():
-            param.requires_grad = True
-            projector_unfrozen_count += 1
-            # print(f"Unfroze Projector: {name}")
-        if projector_unfrozen_count > 0:
-            print(f"Successfully unfroze {projector_unfrozen_count} parameters in model.get_model().mm_projector.")
-            modules_to_unfreeze.append("mm_projector")
-            unfrozen_something = True
-        else:
-            print("[Warning] Found mm_projector, but no parameters were unfrozen within it.")
-
-    else:
-         print("[Warning] Could not find 'mm_projector' within model.get_model(). Training projector only might fail.")
-
-
-    # --- Keep Input Embeddings Frozen ---
-    print("Keeping Input Embeddings frozen.")
-    # --- Keep LM Head Frozen ---
-    print("Keeping Output Embeddings / LM Head frozen.")
-
-
-    # 验证哪些模块被解冻了
-    print(f"Modules intended for unfreezing: {modules_to_unfreeze}")
-    if not unfrozen_something:
-         print("[ERROR] No parameters were unfrozen! Check model structure and freezing logic.")
-    elif "mm_projector" not in modules_to_unfreeze:
-        print("[Warning] mm_projector was not explicitly marked for unfreezing, although some parameters might be trainable if found elsewhere.")
-
-
-    # 打印最终的可训练参数数量确认
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {total_params}")
-    print(f"Trainable parameters (Post freezing - Projector Only): {trainable_params} ({trainable_params/total_params*100:.4f}%)")
-    print(f"Expected trainable params should match the size of the mm_projector (e.g., ~5M for mlp2x_gelu).")
-    print("--- Finished Parameter Freezing (Projector Only Tuning) ---")
-    # -------- 冻结参数结束 --------
-
     # --- Add parameter count logging here ---
+    # This block should run AFTER the freezing logic (either the one triggered by --tune_mm_mlp_adapter
+    # or any other relevant freezing logic that executes).
+    # Ensure this logging happens right before Trainer initialization.
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\n>>> Final Check: Total parameters: {total_params}")
-    print(f">>> Final Check: Trainable parameters: {trainable_params} ({trainable_params/total_params*100:.4f}%)\n")
+    print(f"\n>>> Final Check (Before Trainer): Total parameters: {total_params}")
+    print(f">>> Final Check (Before Trainer): Trainable parameters: {trainable_params} ({trainable_params/total_params*100:.4f}%)\n")
     # --- End parameter count logging ---
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
